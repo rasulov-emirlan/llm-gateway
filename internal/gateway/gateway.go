@@ -40,7 +40,7 @@ func (g *Gateway) Router() http.Handler {
 	api.HandleFunc("POST /v1/chat/completions", g.handleChatCompletion)
 
 	protected := middleware.Auth(g.cfg.APIKey)(api)
-	protected = middleware.RateLimit(g.cfg.RateLimit, g.cfg.RateBurst)(protected)
+	protected = middleware.RateLimit(g.cfg.RateLimit, g.cfg.RateBurst, g.metrics)(protected)
 
 	// Top-level mux: health is public, everything else is protected.
 	mux := http.NewServeMux()

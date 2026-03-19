@@ -20,11 +20,17 @@ type Metrics struct {
 	RequestDuration  metric.Float64Histogram
 	CacheHits        metric.Int64Counter
 	CacheMisses      metric.Int64Counter
+	RateLimited      metric.Int64Counter
 }
 
 // ModelAttr returns an OTel attribute for the model name.
 func ModelAttr(model string) attribute.KeyValue {
 	return attribute.String("model", model)
+}
+
+// ClientAttr returns an OTel attribute for the client IP.
+func ClientAttr(clientIP string) attribute.KeyValue {
+	return attribute.String("client_ip", clientIP)
 }
 
 // WithAttr is a convenience wrapper for metric.WithAttributes.
@@ -114,6 +120,13 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 
+	rateLimited, err := meter.Int64Counter("llm_gateway_rate_limited_total",
+		metric.WithDescription("Total requests rejected by rate limiter"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Metrics{
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -121,6 +134,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		RequestDuration:  requestDuration,
 		CacheHits:        cacheHits,
 		CacheMisses:      cacheMisses,
+		RateLimited:      rateLimited,
 	}, nil
 }
 
@@ -132,6 +146,7 @@ func newNoopMetrics() *Metrics {
 	requestDuration, _ := meter.Float64Histogram("llm_gateway_request_duration_seconds")
 	cacheHits, _ := meter.Int64Counter("llm_gateway_cache_hits_total")
 	cacheMisses, _ := meter.Int64Counter("llm_gateway_cache_misses_total")
+	rateLimited, _ := meter.Int64Counter("llm_gateway_rate_limited_total")
 
 	return &Metrics{
 		PromptTokens:     promptTokens,
@@ -140,5 +155,6 @@ func newNoopMetrics() *Metrics {
 		RequestDuration:  requestDuration,
 		CacheHits:        cacheHits,
 		CacheMisses:      cacheMisses,
+		RateLimited:      rateLimited,
 	}
 }

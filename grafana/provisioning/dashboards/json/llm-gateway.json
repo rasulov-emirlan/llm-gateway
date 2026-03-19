@@ -108,7 +108,7 @@
     {
       "title": "Cache Hit Rate",
       "type": "gauge",
-      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -268,26 +268,60 @@
       ]
     },
     {
-      "title": "Token Usage by Model",
-      "type": "piechart",
+      "title": "Rate Limited Requests",
+      "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": { "mode": "none" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(llm_gateway_rate_limited_total[1m]) * 60",
+          "legendFormat": "429s / min",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Rate Limited (Total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "right" },
-        "pieType": "donut",
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "tooltip": { "mode": "single" }
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
       },
       "targets": [
         {
-          "expr": "sum by (model) (llm_gateway_prompt_tokens_total + llm_gateway_completion_tokens_total)",
-          "legendFormat": "{{model}}",
+          "expr": "sum(llm_gateway_rate_limited_total) or vector(0)",
+          "legendFormat": "429s",
           "refId": "A"
         }
       ]
@@ -302,5 +336,5 @@
   "timezone": "browser",
   "title": "LLM Gateway",
   "uid": "llm-gateway",
-  "version": 1
+  "version": 2
 }

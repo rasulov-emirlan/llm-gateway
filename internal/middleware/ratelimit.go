@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/erasulov/llm-gateway/internal/telemetry"
 )
 
 type bucket struct {
@@ -18,15 +20,17 @@ type rateLimiter struct {
 	rate    float64
 	burst   int
 	once    sync.Once
+	metrics *telemetry.Metrics
 }
 
 // RateLimit returns middleware that enforces a per-client token bucket rate limit.
 // rps is the refill rate (tokens per second), burst is the maximum bucket size.
-func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
+func RateLimit(rps float64, burst int, metrics *telemetry.Metrics) func(http.Handler) http.Handler {
 	rl := &rateLimiter{
 		buckets: make(map[string]*bucket),
 		rate:    rps,
 		burst:   burst,
+		metrics: metrics,
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -37,6 +41,7 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := clientIP(r)
 			if !rl.allow(key) {
+				rl.metrics.RateLimited.Add(r.Context(), 1, telemetry.WithAttr(telemetry.ClientAttr(key)))
 				w.Header().Set("Retry-After", "1")
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
