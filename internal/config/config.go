@@ -31,6 +31,9 @@ type Config struct {
 
 	// Multi-provider configuration.
 	Providers []ProviderConfig
+
+	// API key management.
+	APIKeysFile string // path to JSON file with API key definitions
 }
 
 func Load() *Config {
@@ -44,6 +47,7 @@ func Load() *Config {
 		RedisURL:       getEnv("REDIS_URL", ""),
 		CacheTTL:       getEnvDuration("CACHE_TTL", 5*time.Minute),
 		OTelEndpoint:   getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		APIKeysFile:    getEnv("API_KEYS_FILE", ""),
 	}
 
 	cfg.Providers = loadProviders()

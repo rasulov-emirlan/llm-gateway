@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/middleware"
@@ -23,14 +24,16 @@ type Gateway struct {
 	cfg      *config.Config
 	metrics  *telemetry.Metrics
 	cache    *cache.Cache
+	keyStore *apikey.Store
 }
 
-func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache) *Gateway {
+func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store) *Gateway {
 	return &Gateway{
 		registry: registry,
 		cfg:      cfg,
 		metrics:  metrics,
 		cache:    c,
+		keyStore: keyStore,
 	}
 }
 
@@ -40,8 +43,9 @@ func (g *Gateway) Router() http.Handler {
 	api.HandleFunc("GET /v1/models", g.handleListModels)
 	api.HandleFunc("POST /v1/chat/completions", g.handleChatCompletion)
 
-	protected := middleware.Auth(g.cfg.APIKey)(api)
-	protected = middleware.RateLimit(g.cfg.RateLimit, g.cfg.RateBurst, g.metrics)(protected)
+	// Auth injects API key into context; RateLimitV2 reads it for per-key limits.
+	protected := middleware.Auth(g.keyStore)(api)
+	protected = middleware.RateLimitV2(g.cfg.RateBurst, g.metrics)(protected)
 
 	// Top-level mux: health is public, everything else is protected.
 	mux := http.NewServeMux()

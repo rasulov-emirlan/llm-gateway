@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/gateway"
@@ -55,7 +56,10 @@ func main() {
 	// Build provider registry.
 	registry := buildRegistry(cfg)
 
-	gw := gateway.New(registry, cfg, metrics, c)
+	// Build API key store.
+	keyStore := buildKeyStore(cfg)
+
+	gw := gateway.New(registry, cfg, metrics, c, keyStore)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -118,6 +122,23 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 	}
 
 	return registry
+}
+
+// buildKeyStore creates and populates the API key store.
+func buildKeyStore(cfg *config.Config) *apikey.Store {
+	store := apikey.NewStore()
+
+	// Load from file if configured.
+	if cfg.APIKeysFile != "" {
+		if err := store.LoadFromFile(cfg.APIKeysFile); err != nil {
+			slog.Error("failed to load API keys file", "path", cfg.APIKeysFile, "error", err)
+		}
+	}
+
+	// Backwards compatibility: load legacy single API_KEY as pro tier.
+	store.LoadLegacyKey(cfg.APIKey)
+
+	return store
 }
 
 func providerNames(providers []config.ProviderConfig) []string {
