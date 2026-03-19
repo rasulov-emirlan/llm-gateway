@@ -37,7 +37,11 @@ func (c *Coalescer) Do(key string, fn func() (any, error)) (any, error, bool) {
 	if call, ok := c.calls[key]; ok {
 		c.mu.Unlock()
 		call.wg.Wait()
-		slog.Debug("coalesced request", "key", key[:16])
+		keyPreview := key
+		if len(keyPreview) > 16 {
+			keyPreview = keyPreview[:16]
+		}
+		slog.Debug("coalesced request", "key", keyPreview)
 		return call.val, call.err, true
 	}
 
