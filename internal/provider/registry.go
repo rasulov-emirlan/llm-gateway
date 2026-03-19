@@ -2,47 +2,69 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/erasulov/llm-gateway/internal/resilience"
 )
 
 // Registry manages provider instances and routes requests to the appropriate
-// provider based on model name. It maintains a model→provider mapping and
-// supports health-aware routing.
-//
-// This is analogous to how LiteLLM and Portkey route requests across providers:
-// the caller specifies a model name, and the registry resolves which backend
-// to hit.
+// provider based on model name. Each provider is wrapped with a circuit breaker
+// for resilience, and calls are retried with exponential backoff.
 type Registry struct {
 	mu sync.RWMutex
 
 	// providers maps provider name → Provider instance.
 	providers map[string]Provider
 
+	// breakers maps provider name → CircuitBreaker.
+	breakers map[string]*resilience.CircuitBreaker
+
 	// modelRoutes maps model name → provider name.
-	// Populated from config: each provider declares which models it serves.
 	modelRoutes map[string]string
 
 	// fallbackModels is the ordered fallback chain for model failures.
 	fallbackModels []string
+
+	// retryCfg is the retry configuration for provider calls.
+	retryCfg resilience.RetryConfig
+
+	// cbCfg is the circuit breaker configuration for providers.
+	cbCfg resilience.CircuitBreakerConfig
 }
 
-// NewRegistry creates an empty provider registry.
+// NewRegistry creates an empty provider registry with default resilience configs.
 func NewRegistry(fallbackModels []string) *Registry {
 	return &Registry{
 		providers:      make(map[string]Provider),
+		breakers:       make(map[string]*resilience.CircuitBreaker),
 		modelRoutes:    make(map[string]string),
 		fallbackModels: fallbackModels,
+		retryCfg:       resilience.DefaultRetryConfig(),
+		cbCfg:          resilience.DefaultCircuitBreakerConfig(),
 	}
 }
 
-// Register adds a provider and maps its models to it.
+// SetRetryConfig overrides the default retry configuration.
+func (r *Registry) SetRetryConfig(cfg resilience.RetryConfig) {
+	r.retryCfg = cfg
+}
+
+// SetCircuitBreakerConfig overrides the default circuit breaker configuration.
+func (r *Registry) SetCircuitBreakerConfig(cfg resilience.CircuitBreakerConfig) {
+	r.cbCfg = cfg
+}
+
+// Register adds a provider, creates its circuit breaker, and maps models.
 func (r *Registry) Register(p Provider, models []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.providers[p.Name()] = p
+	r.breakers[p.Name()] = resilience.NewCircuitBreaker(p.Name(), r.cbCfg)
+
 	for _, model := range models {
 		r.modelRoutes[model] = p.Name()
 		slog.Debug("registered model route", "model", model, "provider", p.Name())
@@ -51,7 +73,6 @@ func (r *Registry) Register(p Provider, models []string) {
 }
 
 // ResolveProvider returns the provider responsible for a given model.
-// Returns an error if no provider is registered for the model.
 func (r *Registry) ResolveProvider(model string) (Provider, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -69,8 +90,14 @@ func (r *Registry) ResolveProvider(model string) (Provider, error) {
 	return p, nil
 }
 
-// Chat routes a chat request to the appropriate provider, with fallback support.
-// It tries the requested model first, then iterates through the fallback chain.
+// getBreaker returns the circuit breaker for a provider.
+func (r *Registry) getBreaker(providerName string) *resilience.CircuitBreaker {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.breakers[providerName]
+}
+
+// Chat routes a request through circuit breaker + retry, with fallback.
 func (r *Registry) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	chain := r.buildModelChain(req.Model)
 	var lastErr error
@@ -83,14 +110,37 @@ func (r *Registry) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, er
 			continue
 		}
 
+		cb := r.getBreaker(p.Name())
+
+		// Skip providers with open circuit breakers.
+		if cb.State() == resilience.StateOpen {
+			slog.Warn("circuit breaker open, skipping provider",
+				"provider", p.Name(), "model", model)
+			lastErr = fmt.Errorf("%s: %w", p.Name(), resilience.ErrCircuitOpen)
+			continue
+		}
+
+		var resp *ChatResponse
 		req.Model = model
-		resp, err := p.Chat(ctx, req)
+
+		// Retry with circuit breaker wrapping.
+		err = resilience.Retry(ctx, r.retryCfg, func(ctx context.Context) error {
+			return cb.Execute(ctx, func(ctx context.Context) error {
+				var chatErr error
+				resp, chatErr = p.Chat(ctx, req)
+				return chatErr
+			})
+		})
+
 		if err != nil {
-			slog.Warn("provider call failed, trying fallback",
-				"model", model,
-				"provider", p.Name(),
-				"error", err,
-			)
+			// Don't retry if circuit is now open.
+			if errors.Is(err, resilience.ErrCircuitOpen) {
+				slog.Warn("circuit opened during retry, trying fallback",
+					"model", model, "provider", p.Name())
+			} else {
+				slog.Warn("provider call failed after retries, trying fallback",
+					"model", model, "provider", p.Name(), "error", err)
+			}
 			lastErr = err
 			continue
 		}
@@ -104,7 +154,8 @@ func (r *Registry) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, er
 	return nil, fmt.Errorf("all models failed, last error: %w", lastErr)
 }
 
-// ChatStream routes a streaming request to the appropriate provider, with fallback.
+// ChatStream routes a streaming request with circuit breaker + fallback.
+// Note: streaming requests are not retried (you can't replay a partial stream).
 func (r *Registry) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, string, error) {
 	chain := r.buildModelChain(req.Model)
 	var lastErr error
@@ -117,14 +168,28 @@ func (r *Registry) ChatStream(ctx context.Context, req ChatRequest) (<-chan Stre
 			continue
 		}
 
+		cb := r.getBreaker(p.Name())
+
+		if cb.State() == resilience.StateOpen {
+			slog.Warn("circuit breaker open, skipping provider",
+				"provider", p.Name(), "model", model)
+			lastErr = fmt.Errorf("%s: %w", p.Name(), resilience.ErrCircuitOpen)
+			continue
+		}
+
 		req.Model = model
-		ch, err := p.ChatStream(ctx, req)
+		var ch <-chan StreamChunk
+
+		// Circuit breaker wraps the stream establishment (not the reading).
+		err = cb.Execute(ctx, func(ctx context.Context) error {
+			var streamErr error
+			ch, streamErr = p.ChatStream(ctx, req)
+			return streamErr
+		})
+
 		if err != nil {
 			slog.Warn("stream failed, trying fallback",
-				"model", model,
-				"provider", p.Name(),
-				"error", err,
-			)
+				"model", model, "provider", p.Name(), "error", err)
 			lastErr = err
 			continue
 		}
