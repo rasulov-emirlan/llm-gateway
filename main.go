@@ -29,13 +29,20 @@ func main() {
 
 	ctx := context.Background()
 
-	// Initialize telemetry.
+	// Initialize telemetry (metrics + tracing).
 	metrics, shutdownMetrics, err := telemetry.New(ctx, cfg.OTelEndpoint)
 	if err != nil {
-		slog.Error("failed to initialize telemetry", "error", err)
+		slog.Error("failed to initialize metrics", "error", err)
 		os.Exit(1)
 	}
 	defer shutdownMetrics()
+
+	shutdownTracing, err := telemetry.InitTracing(ctx, cfg.OTelEndpoint)
+	if err != nil {
+		slog.Error("failed to initialize tracing", "error", err)
+		os.Exit(1)
+	}
+	defer shutdownTracing()
 
 	// Initialize cache.
 	c, err := cache.New(cfg.RedisURL, cfg.CacheTTL)

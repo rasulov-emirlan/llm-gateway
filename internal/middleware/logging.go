@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/erasulov/llm-gateway/internal/telemetry"
 )
 
 type responseWriter struct {
@@ -23,7 +25,7 @@ func (rw *responseWriter) Flush() {
 	}
 }
 
-// Logging logs each request with method, path, status, and duration.
+// Logging logs each request with method, path, status, duration, and trace context.
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -31,12 +33,20 @@ func Logging(next http.Handler) http.Handler {
 
 		next.ServeHTTP(wrapped, r)
 
-		slog.Info("request",
+		// Extract trace context for log correlation.
+		traceID, spanID := telemetry.SpanFromContext(r.Context())
+
+		attrs := []any{
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", wrapped.statusCode,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"remote_addr", r.RemoteAddr,
-		)
+		}
+		if traceID != "" {
+			attrs = append(attrs, "trace_id", traceID, "span_id", spanID)
+		}
+
+		slog.Info("request", attrs...)
 	})
 }

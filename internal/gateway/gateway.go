@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
@@ -54,14 +56,20 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
-	models, err := g.registry.ListAllModels(r.Context())
+	ctx, span := telemetry.Tracer.Start(r.Context(), "gateway.list_models")
+	defer span.End()
+
+	models, err := g.registry.ListAllModels(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "list models failed")
 		slog.Error("list models failed", "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to list models"})
 		return
 	}
 
-	// Return in OpenAI-compatible format.
+	span.SetAttributes(attribute.Int("models.count", len(models)))
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   models,
@@ -82,8 +90,13 @@ type ChatCompletionRequest struct {
 func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	ctx, span := telemetry.Tracer.Start(r.Context(), "gateway.chat_completion")
+	defer span.End()
+
 	var req ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -98,8 +111,14 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	span.SetAttributes(
+		telemetry.AttrModel.String(req.Model),
+		telemetry.AttrStream.Bool(req.Stream),
+		attribute.Int("messages.count", len(req.Messages)),
+	)
+
 	modelAttr := attribute.String("model", req.Model)
-	g.metrics.RequestTotal.Add(r.Context(), 1, telemetry.WithAttr(modelAttr))
+	g.metrics.RequestTotal.Add(ctx, 1, telemetry.WithAttr(modelAttr))
 
 	providerReq := provider.ChatRequest{
 		Model:       req.Model,
@@ -111,36 +130,77 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		g.handleStreamingChat(w, r, providerReq)
+		g.handleStreamingChat(w, r.WithContext(ctx), providerReq)
 		return
 	}
 
-	// Check cache for non-streaming requests.
+	// Check cache.
 	cacheKey := cache.Key(req.Model, req.Messages)
-	if cached, ok := g.cache.Get(r.Context(), cacheKey); ok {
+	if cached, ok := g.cacheGet(ctx, cacheKey); ok {
+		span.SetAttributes(telemetry.AttrCacheHit.Bool(true))
 		slog.Info("cache hit", "model", req.Model)
-		g.metrics.CacheHits.Add(r.Context(), 1, telemetry.WithAttr(modelAttr))
-		g.recordDuration(r.Context(), start, req.Model)
+		g.metrics.CacheHits.Add(ctx, 1, telemetry.WithAttr(modelAttr))
+		g.recordDuration(ctx, start, req.Model)
 		writeJSON(w, http.StatusOK, cached)
 		return
 	}
-	g.metrics.CacheMisses.Add(r.Context(), 1, telemetry.WithAttr(modelAttr))
+	span.SetAttributes(telemetry.AttrCacheHit.Bool(false))
+	g.metrics.CacheMisses.Add(ctx, 1, telemetry.WithAttr(modelAttr))
 
-	// Route through registry (handles fallback internally).
-	resp, err := g.registry.Chat(r.Context(), providerReq)
+	// Call provider (with tracing child span).
+	resp, err := g.chatWithTracing(ctx, providerReq)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "chat completion failed")
 		slog.Error("chat completion failed", "error", err, "model", req.Model)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "chat completion failed"})
 		return
 	}
 
-	g.recordTokens(r.Context(), resp)
-	g.recordDuration(r.Context(), start, resp.Model)
+	span.SetAttributes(
+		telemetry.AttrProvider.String(resp.Provider),
+		telemetry.AttrPromptTokens.Int(resp.PromptTokens),
+		telemetry.AttrCompletionTokens.Int(resp.CompletionTokens),
+		telemetry.AttrTotalTokens.Int(resp.TotalTokens),
+	)
 
-	// Cache the response.
-	g.cache.Set(r.Context(), cacheKey, resp)
+	g.recordTokens(ctx, resp)
+	g.recordDuration(ctx, start, resp.Model)
+
+	g.cache.Set(ctx, cacheKey, resp)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// cacheGet wraps cache lookup with a tracing span.
+func (g *Gateway) cacheGet(ctx context.Context, key string) (*provider.ChatResponse, bool) {
+	_, span := telemetry.Tracer.Start(ctx, "cache.get")
+	defer span.End()
+
+	resp, ok := g.cache.Get(ctx, key)
+	span.SetAttributes(attribute.Bool("hit", ok))
+	return resp, ok
+}
+
+// chatWithTracing wraps the registry Chat call with a tracing span.
+func (g *Gateway) chatWithTracing(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	ctx, span := telemetry.Tracer.Start(ctx, "provider.chat",
+		trace.WithAttributes(telemetry.AttrModel.String(req.Model)),
+	)
+	defer span.End()
+
+	resp, err := g.registry.Chat(ctx, req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	span.SetAttributes(
+		telemetry.AttrProvider.String(resp.Provider),
+		telemetry.AttrModel.String(resp.Model),
+	)
+	return resp, nil
 }
 
 func (g *Gateway) recordTokens(ctx context.Context, resp *provider.ChatResponse) {

@@ -33,6 +33,19 @@ services:
     ports:
       - "4317:4317"   # OTLP gRPC
       - "8889:8889"   # Prometheus exporter
+    depends_on:
+      - tempo
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    expose:
+      - "4317"   # OTLP gRPC (receives from collector)
+      - "3200"   # Tempo query API (used by Grafana)
     restart: unless-stopped
 
   prometheus:
@@ -58,8 +71,10 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
+      - tempo
     restart: unless-stopped
 
 volumes:
   ollama_data:
   grafana_data:
+  tempo_data:
