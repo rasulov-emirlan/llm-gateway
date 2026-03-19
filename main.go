@@ -12,7 +12,10 @@ import (
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/gateway"
-	"github.com/erasulov/llm-gateway/internal/ollama"
+	"github.com/erasulov/llm-gateway/internal/provider"
+	ollamaProvider "github.com/erasulov/llm-gateway/internal/provider/ollama"
+	openaiProvider "github.com/erasulov/llm-gateway/internal/provider/openai"
+	anthropicProvider "github.com/erasulov/llm-gateway/internal/provider/anthropic"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
 )
 
@@ -42,8 +45,10 @@ func main() {
 	}
 	defer c.Close()
 
-	ollamaClient := ollama.NewClient(cfg.OllamaURL)
-	gw := gateway.New(ollamaClient, cfg, metrics, c)
+	// Build provider registry.
+	registry := buildRegistry(cfg)
+
+	gw := gateway.New(registry, cfg, metrics, c)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -56,7 +61,7 @@ func main() {
 	go func() {
 		slog.Info("starting LLM gateway",
 			"port", cfg.Port,
-			"ollama_url", cfg.OllamaURL,
+			"providers", providerNames(cfg.Providers),
 			"fallback_models", cfg.FallbackModels,
 		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -76,4 +81,44 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server forced shutdown", "error", err)
 	}
+}
+
+// buildRegistry creates a provider registry from config and registers all
+// enabled providers with their model routes.
+func buildRegistry(cfg *config.Config) *provider.Registry {
+	registry := provider.NewRegistry(cfg.FallbackModels)
+
+	for _, pc := range cfg.Providers {
+		if !pc.Enabled {
+			slog.Info("provider disabled, skipping", "name", pc.Name)
+			continue
+		}
+
+		var p provider.Provider
+		switch pc.Name {
+		case "ollama":
+			p = ollamaProvider.NewAdapter(pc.BaseURL)
+		case "openai":
+			p = openaiProvider.NewAdapter(pc.BaseURL, pc.APIKey)
+		case "anthropic":
+			p = anthropicProvider.NewAdapter(pc.BaseURL, pc.APIKey)
+		default:
+			slog.Warn("unknown provider type, skipping", "name", pc.Name)
+			continue
+		}
+
+		registry.Register(p, pc.Models)
+	}
+
+	return registry
+}
+
+func providerNames(providers []config.ProviderConfig) []string {
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
+		if p.Enabled {
+			names = append(names, p.Name)
+		}
+	}
+	return names
 }

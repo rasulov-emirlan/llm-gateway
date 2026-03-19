@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/erasulov/llm-gateway/internal/ollama"
+	"github.com/erasulov/llm-gateway/internal/provider"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -43,7 +43,7 @@ func New(redisURL string, ttl time.Duration) (*Cache, error) {
 }
 
 // Get retrieves a cached response. Returns nil, false if cache is disabled or key not found.
-func (c *Cache) Get(ctx context.Context, key string) (*ollama.ChatResponse, bool) {
+func (c *Cache) Get(ctx context.Context, key string) (*provider.ChatResponse, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -53,7 +53,7 @@ func (c *Cache) Get(ctx context.Context, key string) (*ollama.ChatResponse, bool
 		return nil, false
 	}
 
-	var resp ollama.ChatResponse
+	var resp provider.ChatResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, false
 	}
@@ -62,7 +62,7 @@ func (c *Cache) Get(ctx context.Context, key string) (*ollama.ChatResponse, bool
 }
 
 // Set stores a response in cache. No-op if cache is disabled.
-func (c *Cache) Set(ctx context.Context, key string, resp *ollama.ChatResponse) {
+func (c *Cache) Set(ctx context.Context, key string, resp *provider.ChatResponse) {
 	if c == nil {
 		return
 	}
@@ -79,10 +79,10 @@ func (c *Cache) Set(ctx context.Context, key string, resp *ollama.ChatResponse) 
 }
 
 // Key computes a cache key from the model and messages.
-func Key(model string, messages []ollama.Message) string {
+func Key(model string, messages []provider.Message) string {
 	payload := struct {
-		Model    string           `json:"model"`
-		Messages []ollama.Message `json:"messages"`
+		Model    string             `json:"model"`
+		Messages []provider.Message `json:"messages"`
 	}{
 		Model:    model,
 		Messages: messages,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"strconv"
@@ -8,23 +9,33 @@ import (
 	"time"
 )
 
+// ProviderConfig defines a single LLM provider backend.
+type ProviderConfig struct {
+	Name    string   `json:"name"`     // "ollama", "openai", "anthropic"
+	BaseURL string   `json:"base_url"` // e.g., "http://localhost:11434", "https://api.openai.com"
+	APIKey  string   `json:"api_key"`
+	Models  []string `json:"models"`   // models this provider serves (used for routing)
+	Enabled bool     `json:"enabled"`
+}
+
 type Config struct {
 	Port           string
-	OllamaURL      string
 	APIKey         string
 	LogLevel       slog.Level
-	RateLimit      float64       // requests per second per client
-	RateBurst      int           // max burst size
-	FallbackModels []string      // ordered fallback model list
-	RedisURL       string        // empty = cache disabled
-	CacheTTL       time.Duration // cache entry TTL
-	OTelEndpoint   string        // OTLP gRPC endpoint, empty = metrics disabled
+	RateLimit      float64
+	RateBurst      int
+	FallbackModels []string
+	RedisURL       string
+	CacheTTL       time.Duration
+	OTelEndpoint   string
+
+	// Multi-provider configuration.
+	Providers []ProviderConfig
 }
 
 func Load() *Config {
-	return &Config{
+	cfg := &Config{
 		Port:           getEnv("PORT", "8080"),
-		OllamaURL:      getEnv("OLLAMA_URL", "http://localhost:11434"),
 		APIKey:         getEnv("API_KEY", ""),
 		LogLevel:       parseLogLevel(getEnv("LOG_LEVEL", "info")),
 		RateLimit:      getEnvFloat("RATE_LIMIT", 10),
@@ -34,6 +45,91 @@ func Load() *Config {
 		CacheTTL:       getEnvDuration("CACHE_TTL", 5*time.Minute),
 		OTelEndpoint:   getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 	}
+
+	cfg.Providers = loadProviders()
+	return cfg
+}
+
+// loadProviders builds the provider list. If PROVIDERS_CONFIG is set (JSON file path),
+// it loads from that file. Otherwise, it builds a default Ollama provider from
+// legacy env vars for backwards compatibility.
+func loadProviders() []ProviderConfig {
+	configPath := os.Getenv("PROVIDERS_CONFIG")
+	if configPath != "" {
+		providers, err := loadProvidersFromFile(configPath)
+		if err != nil {
+			slog.Error("failed to load providers config, falling back to env", "path", configPath, "error", err)
+		} else {
+			return providers
+		}
+	}
+
+	// Default: build from legacy env vars for backwards compatibility.
+	var providers []ProviderConfig
+
+	// Ollama (always present if OLLAMA_URL is set or default).
+	ollamaURL := getEnv("OLLAMA_URL", "http://localhost:11434")
+	ollamaModels := getEnvList("OLLAMA_MODELS")
+	providers = append(providers, ProviderConfig{
+		Name:    "ollama",
+		BaseURL: ollamaURL,
+		Models:  ollamaModels,
+		Enabled: true,
+	})
+
+	// OpenAI (optional, enabled if OPENAI_API_KEY is set).
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		openaiModels := getEnvList("OPENAI_MODELS")
+		if len(openaiModels) == 0 {
+			openaiModels = []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1"}
+		}
+		providers = append(providers, ProviderConfig{
+			Name:    "openai",
+			BaseURL: getEnv("OPENAI_BASE_URL", "https://api.openai.com"),
+			APIKey:  key,
+			Models:  openaiModels,
+			Enabled: true,
+		})
+	}
+
+	// Anthropic (optional, enabled if ANTHROPIC_API_KEY is set).
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		anthropicModels := getEnvList("ANTHROPIC_MODELS")
+		if len(anthropicModels) == 0 {
+			anthropicModels = []string{"claude-sonnet-4-20250514", "claude-haiku-4-20250506"}
+		}
+		providers = append(providers, ProviderConfig{
+			Name:    "anthropic",
+			BaseURL: getEnv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+			APIKey:  key,
+			Models:  anthropicModels,
+			Enabled: true,
+		})
+	}
+
+	return providers
+}
+
+func loadProvidersFromFile(path string) ([]ProviderConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var providers []ProviderConfig
+	if err := json.Unmarshal(data, &providers); err != nil {
+		return nil, err
+	}
+
+	// Expand env vars in API keys (e.g., "$OPENAI_API_KEY").
+	for i := range providers {
+		if strings.HasPrefix(providers[i].APIKey, "$") {
+			envName := strings.TrimPrefix(providers[i].APIKey, "$")
+			providers[i].APIKey = os.Getenv(envName)
+		}
+	}
+
+	return providers, nil
 }
 
 func getEnv(key, fallback string) string {

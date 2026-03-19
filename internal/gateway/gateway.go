@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -13,23 +12,23 @@ import (
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/middleware"
-	"github.com/erasulov/llm-gateway/internal/ollama"
+	"github.com/erasulov/llm-gateway/internal/provider"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
 )
 
 type Gateway struct {
-	ollama  *ollama.Client
-	cfg     *config.Config
-	metrics *telemetry.Metrics
-	cache   *cache.Cache
+	registry *provider.Registry
+	cfg      *config.Config
+	metrics  *telemetry.Metrics
+	cache    *cache.Cache
 }
 
-func New(ollamaClient *ollama.Client, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache) *Gateway {
+func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache) *Gateway {
 	return &Gateway{
-		ollama:  ollamaClient,
-		cfg:     cfg,
-		metrics: metrics,
-		cache:   c,
+		registry: registry,
+		cfg:      cfg,
+		metrics:  metrics,
+		cache:    c,
 	}
 }
 
@@ -55,21 +54,29 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleListModels(w http.ResponseWriter, r *http.Request) {
-	models, err := g.ollama.ListModels(r.Context())
+	models, err := g.registry.ListAllModels(r.Context())
 	if err != nil {
 		slog.Error("list models failed", "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to list models"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	// Return in OpenAI-compatible format.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   models,
+	})
 }
 
-// ChatCompletionRequest is the gateway's API request format.
+// ChatCompletionRequest is the gateway's API request format (OpenAI-compatible).
 type ChatCompletionRequest struct {
-	Model    string           `json:"model"`
-	Messages []ollama.Message `json:"messages"`
-	Stream   bool             `json:"stream"`
+	Model       string             `json:"model"`
+	Messages    []provider.Message `json:"messages"`
+	Stream      bool               `json:"stream"`
+	MaxTokens   int                `json:"max_tokens,omitempty"`
+	Temperature *float64           `json:"temperature,omitempty"`
+	TopP        *float64           `json:"top_p,omitempty"`
+	Stop        []string           `json:"stop,omitempty"`
 }
 
 func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
@@ -94,13 +101,17 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	modelAttr := attribute.String("model", req.Model)
 	g.metrics.RequestTotal.Add(r.Context(), 1, telemetry.WithAttr(modelAttr))
 
-	ollamaReq := ollama.ChatRequest{
-		Model:    req.Model,
-		Messages: req.Messages,
+	providerReq := provider.ChatRequest{
+		Model:       req.Model,
+		Messages:    req.Messages,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stop:        req.Stop,
 	}
 
 	if req.Stream {
-		g.handleStreamingChat(w, r, ollamaReq)
+		g.handleStreamingChat(w, r, providerReq)
 		return
 	}
 
@@ -115,7 +126,8 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	g.metrics.CacheMisses.Add(r.Context(), 1, telemetry.WithAttr(modelAttr))
 
-	resp, err := g.chatWithFallback(r.Context(), ollamaReq)
+	// Route through registry (handles fallback internally).
+	resp, err := g.registry.Chat(r.Context(), providerReq)
 	if err != nil {
 		slog.Error("chat completion failed", "error", err, "model", req.Model)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "chat completion failed"})
@@ -131,52 +143,17 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// chatWithFallback tries the primary model, then fallback models in order.
-func (g *Gateway) chatWithFallback(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error) {
-	models := g.buildModelChain(req.Model)
-	var lastErr error
-
-	for _, model := range models {
-		req.Model = model
-		resp, err := g.ollama.Chat(ctx, req)
-		if err != nil {
-			slog.Warn("model failed, trying fallback", "model", model, "error", err)
-			lastErr = err
-			continue
-		}
-		if model != models[0] {
-			slog.Info("fallback succeeded", "original", models[0], "fallback", model)
-		}
-		return resp, nil
-	}
-
-	return nil, fmt.Errorf("all models failed, last error: %w", lastErr)
-}
-
-// buildModelChain returns [primaryModel, fallback1, fallback2, ...] with duplicates removed.
-func (g *Gateway) buildModelChain(primary string) []string {
-	seen := map[string]bool{primary: true}
-	chain := []string{primary}
-
-	for _, m := range g.cfg.FallbackModels {
-		if !seen[m] {
-			seen[m] = true
-			chain = append(chain, m)
-		}
-	}
-
-	return chain
-}
-
-func (g *Gateway) recordTokens(ctx context.Context, resp *ollama.ChatResponse) {
+func (g *Gateway) recordTokens(ctx context.Context, resp *provider.ChatResponse) {
 	modelAttr := telemetry.ModelAttr(resp.Model)
-	g.metrics.PromptTokens.Add(ctx, int64(resp.PromptEvalCount), telemetry.WithAttr(modelAttr))
-	g.metrics.CompletionTokens.Add(ctx, int64(resp.EvalCount), telemetry.WithAttr(modelAttr))
+	providerAttr := attribute.String("provider", resp.Provider)
+	g.metrics.PromptTokens.Add(ctx, int64(resp.PromptTokens), telemetry.WithAttr(modelAttr, providerAttr))
+	g.metrics.CompletionTokens.Add(ctx, int64(resp.CompletionTokens), telemetry.WithAttr(modelAttr, providerAttr))
 
 	slog.Info("chat completion",
 		"model", resp.Model,
-		"prompt_tokens", resp.PromptEvalCount,
-		"completion_tokens", resp.EvalCount,
+		"provider", resp.Provider,
+		"prompt_tokens", resp.PromptTokens,
+		"completion_tokens", resp.CompletionTokens,
 	)
 }
 
