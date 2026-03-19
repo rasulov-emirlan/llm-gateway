@@ -1,0 +1,6 @@
+bin/
+.env
+*.exe
+*.dll
+*.so
+*.dylib
