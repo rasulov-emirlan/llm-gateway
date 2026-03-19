@@ -14,6 +14,7 @@ import (
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/gateway"
 	"github.com/erasulov/llm-gateway/internal/provider"
+	"github.com/erasulov/llm-gateway/internal/usage"
 	ollamaProvider "github.com/erasulov/llm-gateway/internal/provider/ollama"
 	openaiProvider "github.com/erasulov/llm-gateway/internal/provider/openai"
 	anthropicProvider "github.com/erasulov/llm-gateway/internal/provider/anthropic"
@@ -59,7 +60,10 @@ func main() {
 	// Build API key store.
 	keyStore := buildKeyStore(cfg)
 
-	gw := gateway.New(registry, cfg, metrics, c, keyStore)
+	// Initialize usage tracker.
+	tracker := usage.NewTracker()
+
+	gw := gateway.New(registry, cfg, metrics, c, keyStore, tracker)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

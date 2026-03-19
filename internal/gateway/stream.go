@@ -11,8 +11,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/provider"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
+	"github.com/erasulov/llm-gateway/internal/usage"
 )
 
 func (g *Gateway) handleStreamingChat(w http.ResponseWriter, r *http.Request, req provider.ChatRequest) {
@@ -97,6 +99,20 @@ func (g *Gateway) consumeStream(
 			modelAttr := telemetry.ModelAttr(model)
 			g.metrics.PromptTokens.Add(ctx, int64(chunk.Usage.PromptTokens), telemetry.WithAttr(modelAttr))
 			g.metrics.CompletionTokens.Add(ctx, int64(chunk.Usage.CompletionTokens), telemetry.WithAttr(modelAttr))
+
+			// Record usage for streaming responses.
+			keyID := "anonymous"
+			if key := apikey.FromContext(ctx); key != nil {
+				keyID = key.Key
+			}
+			g.tracker.RecordUsage(ctx, usage.Record{
+				APIKeyID:         keyID,
+				Provider:         "stream",
+				Model:            model,
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:      chunk.Usage.TotalTokens,
+			})
 
 			slog.Info("streaming complete",
 				"model", model,

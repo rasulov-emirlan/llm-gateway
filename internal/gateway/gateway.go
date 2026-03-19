@@ -17,6 +17,7 @@ import (
 	"github.com/erasulov/llm-gateway/internal/middleware"
 	"github.com/erasulov/llm-gateway/internal/provider"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
+	"github.com/erasulov/llm-gateway/internal/usage"
 )
 
 type Gateway struct {
@@ -25,15 +26,17 @@ type Gateway struct {
 	metrics  *telemetry.Metrics
 	cache    *cache.Cache
 	keyStore *apikey.Store
+	tracker  *usage.Tracker
 }
 
-func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store) *Gateway {
+func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker *usage.Tracker) *Gateway {
 	return &Gateway{
 		registry: registry,
 		cfg:      cfg,
 		metrics:  metrics,
 		cache:    c,
 		keyStore: keyStore,
+		tracker:  tracker,
 	}
 }
 
@@ -42,6 +45,7 @@ func (g *Gateway) Router() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/models", g.handleListModels)
 	api.HandleFunc("POST /v1/chat/completions", g.handleChatCompletion)
+	api.HandleFunc("GET /v1/usage", g.handleUsage)
 
 	// Auth injects API key into context; RateLimitV2 reads it for per-key limits.
 	protected := middleware.Auth(g.keyStore)(api)
@@ -115,6 +119,18 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check daily token budget before making the call.
+	if key := apikey.FromContext(ctx); key != nil && key.DailyTokenCap > 0 {
+		remaining := g.tracker.CheckBudget(key.Key, key.DailyTokenCap)
+		if remaining == 0 {
+			span.SetStatus(codes.Error, "daily token budget exceeded")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "daily token budget exceeded",
+			})
+			return
+		}
+	}
+
 	span.SetAttributes(
 		telemetry.AttrModel.String(req.Model),
 		telemetry.AttrStream.Bool(req.Stream),
@@ -151,7 +167,7 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(telemetry.AttrCacheHit.Bool(false))
 	g.metrics.CacheMisses.Add(ctx, 1, telemetry.WithAttr(modelAttr))
 
-	// Call provider (with tracing child span).
+	// Call provider.
 	resp, err := g.chatWithTracing(ctx, providerReq)
 	if err != nil {
 		span.RecordError(err)
@@ -169,11 +185,62 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	)
 
 	g.recordTokens(ctx, resp)
+	g.recordUsage(ctx, resp)
 	g.recordDuration(ctx, start, resp.Model)
 
 	g.cache.Set(ctx, cacheKey, resp)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleUsage returns usage summary for the authenticated API key.
+func (g *Gateway) handleUsage(w http.ResponseWriter, r *http.Request) {
+	key := apikey.FromContext(r.Context())
+	keyID := "anonymous"
+	if key != nil {
+		keyID = key.Key
+	}
+
+	// Default to last 24 hours.
+	since := time.Now().Add(-24 * time.Hour)
+	if q := r.URL.Query().Get("since"); q != "" {
+		if t, err := time.Parse(time.RFC3339, q); err == nil {
+			since = t
+		}
+	}
+
+	summary := g.tracker.GetUsage(keyID, since)
+
+	var budgetInfo map[string]any
+	if key != nil && key.DailyTokenCap > 0 {
+		remaining := g.tracker.CheckBudget(key.Key, key.DailyTokenCap)
+		budgetInfo = map[string]any{
+			"daily_cap":       key.DailyTokenCap,
+			"daily_remaining": remaining,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"usage":  summary,
+		"budget": budgetInfo,
+	})
+}
+
+// recordUsage tracks token consumption for the authenticated key.
+func (g *Gateway) recordUsage(ctx context.Context, resp *provider.ChatResponse) {
+	keyID := "anonymous"
+	if key := apikey.FromContext(ctx); key != nil {
+		keyID = key.Key
+	}
+
+	g.tracker.RecordUsage(ctx, usage.Record{
+		APIKeyID:         keyID,
+		Provider:         resp.Provider,
+		Model:            resp.Model,
+		PromptTokens:     resp.PromptTokens,
+		CompletionTokens: resp.CompletionTokens,
+		TotalTokens:      resp.TotalTokens,
+	})
 }
 
 // cacheGet wraps cache lookup with a tracing span.
