@@ -38,6 +38,9 @@ type Config struct {
 	// Admission control.
 	MaxConcurrent int // max concurrent provider calls (0 = 50)
 	MaxQueueDepth int // max queued requests (0 = 100)
+
+	// Admin API.
+	AdminPort string
 }
 
 func Load() *Config {
@@ -54,6 +57,7 @@ func Load() *Config {
 		APIKeysFile:    getEnv("API_KEYS_FILE", ""),
 		MaxConcurrent:  getEnvInt("MAX_CONCURRENT", 50),
 		MaxQueueDepth:  getEnvInt("MAX_QUEUE_DEPTH", 100),
+		AdminPort:      getEnv("ADMIN_PORT", "9091"),
 	}
 
 	cfg.Providers = loadProviders()

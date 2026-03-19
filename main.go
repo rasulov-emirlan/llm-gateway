@@ -9,16 +9,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/erasulov/llm-gateway/internal/admin"
 	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/gateway"
+	"github.com/erasulov/llm-gateway/internal/pipeline"
 	"github.com/erasulov/llm-gateway/internal/provider"
-	"github.com/erasulov/llm-gateway/internal/usage"
+	anthropicProvider "github.com/erasulov/llm-gateway/internal/provider/anthropic"
 	ollamaProvider "github.com/erasulov/llm-gateway/internal/provider/ollama"
 	openaiProvider "github.com/erasulov/llm-gateway/internal/provider/openai"
-	anthropicProvider "github.com/erasulov/llm-gateway/internal/provider/anthropic"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
+	"github.com/erasulov/llm-gateway/internal/usage"
 )
 
 func main() {
@@ -63,7 +65,10 @@ func main() {
 	// Initialize usage tracker.
 	tracker := usage.NewTracker()
 
-	gw := gateway.New(registry, cfg, metrics, c, keyStore, tracker)
+	// Build content processing pipeline.
+	pipe := buildPipeline()
+
+	gw := gateway.New(registry, cfg, metrics, c, keyStore, tracker, pipe)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -73,9 +78,18 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Start admin server on separate port.
+	adminSrv := admin.NewServer(registry, keyStore, tracker, gw.Admission())
+	go func() {
+		if err := adminSrv.ListenAndServe(":" + cfg.AdminPort); err != nil && err != http.ErrServerClosed {
+			slog.Error("admin server error", "error", err)
+		}
+	}()
+
 	go func() {
 		slog.Info("starting LLM gateway",
 			"port", cfg.Port,
+			"admin_port", cfg.AdminPort,
 			"providers", providerNames(cfg.Providers),
 			"fallback_models", cfg.FallbackModels,
 		)
@@ -132,17 +146,22 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 func buildKeyStore(cfg *config.Config) *apikey.Store {
 	store := apikey.NewStore()
 
-	// Load from file if configured.
 	if cfg.APIKeysFile != "" {
 		if err := store.LoadFromFile(cfg.APIKeysFile); err != nil {
 			slog.Error("failed to load API keys file", "path", cfg.APIKeysFile, "error", err)
 		}
 	}
 
-	// Backwards compatibility: load legacy single API_KEY as pro tier.
 	store.LoadLegacyKey(cfg.APIKey)
-
 	return store
+}
+
+// buildPipeline creates the content processing pipeline with default processors.
+func buildPipeline() *pipeline.Pipeline {
+	pipe := pipeline.New()
+	pipe.Register(pipeline.NewPIIDetector())
+	pipe.Register(pipeline.NewPromptInjectionDetector())
+	return pipe
 }
 
 func providerNames(providers []config.ProviderConfig) []string {

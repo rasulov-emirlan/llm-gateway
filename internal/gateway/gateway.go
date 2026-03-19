@@ -15,6 +15,7 @@ import (
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/middleware"
+	pipelinepkg "github.com/erasulov/llm-gateway/internal/pipeline"
 	"github.com/erasulov/llm-gateway/internal/provider"
 	"github.com/erasulov/llm-gateway/internal/queue"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
@@ -30,9 +31,10 @@ type Gateway struct {
 	tracker   *usage.Tracker
 	admission *queue.AdmissionController
 	coalescer *queue.Coalescer
+	pipeline  *pipelinepkg.Pipeline
 }
 
-func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker *usage.Tracker) *Gateway {
+func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker *usage.Tracker, pipeline *pipelinepkg.Pipeline) *Gateway {
 	return &Gateway{
 		registry:  registry,
 		cfg:       cfg,
@@ -42,7 +44,13 @@ func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Met
 		tracker:   tracker,
 		admission: queue.NewAdmissionController(cfg.MaxConcurrent, cfg.MaxQueueDepth),
 		coalescer: queue.NewCoalescer(),
+		pipeline:  pipeline,
 	}
+}
+
+// Admission returns the admission controller (used by admin server).
+func (g *Gateway) Admission() *queue.AdmissionController {
+	return g.admission
 }
 
 func (g *Gateway) Router() http.Handler {
@@ -154,6 +162,14 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		Stop:        req.Stop,
 	}
 
+	// Run pre-processing pipeline (PII detection, injection detection, etc.)
+	if err := g.pipeline.RunPre(ctx, &providerReq); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "pipeline rejected request")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
 	if req.Stream {
 		g.handleStreamingChat(w, r.WithContext(ctx), providerReq)
 		return
@@ -188,6 +204,14 @@ func (g *Gateway) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		telemetry.AttrCompletionTokens.Int(resp.CompletionTokens),
 		telemetry.AttrTotalTokens.Int(resp.TotalTokens),
 	)
+
+	// Run post-processing pipeline (content moderation, output guardrails, etc.)
+	if err := g.pipeline.RunPost(ctx, &providerReq, resp); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "pipeline rejected response")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 
 	g.recordTokens(ctx, resp)
 	g.recordUsage(ctx, resp)
