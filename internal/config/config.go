@@ -34,6 +34,10 @@ type Config struct {
 
 	// API key management.
 	APIKeysFile string // path to JSON file with API key definitions
+
+	// Admission control.
+	MaxConcurrent int // max concurrent provider calls (0 = 50)
+	MaxQueueDepth int // max queued requests (0 = 100)
 }
 
 func Load() *Config {
@@ -48,6 +52,8 @@ func Load() *Config {
 		CacheTTL:       getEnvDuration("CACHE_TTL", 5*time.Minute),
 		OTelEndpoint:   getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		APIKeysFile:    getEnv("API_KEYS_FILE", ""),
+		MaxConcurrent:  getEnvInt("MAX_CONCURRENT", 50),
+		MaxQueueDepth:  getEnvInt("MAX_QUEUE_DEPTH", 100),
 	}
 
 	cfg.Providers = loadProviders()

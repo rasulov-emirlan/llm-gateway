@@ -16,27 +16,32 @@ import (
 	"github.com/erasulov/llm-gateway/internal/config"
 	"github.com/erasulov/llm-gateway/internal/middleware"
 	"github.com/erasulov/llm-gateway/internal/provider"
+	"github.com/erasulov/llm-gateway/internal/queue"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
 	"github.com/erasulov/llm-gateway/internal/usage"
 )
 
 type Gateway struct {
-	registry *provider.Registry
-	cfg      *config.Config
-	metrics  *telemetry.Metrics
-	cache    *cache.Cache
-	keyStore *apikey.Store
-	tracker  *usage.Tracker
+	registry  *provider.Registry
+	cfg       *config.Config
+	metrics   *telemetry.Metrics
+	cache     *cache.Cache
+	keyStore  *apikey.Store
+	tracker   *usage.Tracker
+	admission *queue.AdmissionController
+	coalescer *queue.Coalescer
 }
 
 func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker *usage.Tracker) *Gateway {
 	return &Gateway{
-		registry: registry,
-		cfg:      cfg,
-		metrics:  metrics,
-		cache:    c,
-		keyStore: keyStore,
-		tracker:  tracker,
+		registry:  registry,
+		cfg:       cfg,
+		metrics:   metrics,
+		cache:     c,
+		keyStore:  keyStore,
+		tracker:   tracker,
+		admission: queue.NewAdmissionController(cfg.MaxConcurrent, cfg.MaxQueueDepth),
+		coalescer: queue.NewCoalescer(),
 	}
 }
 
@@ -253,24 +258,45 @@ func (g *Gateway) cacheGet(ctx context.Context, key string) (*provider.ChatRespo
 	return resp, ok
 }
 
-// chatWithTracing wraps the registry Chat call with a tracing span.
+// chatWithTracing wraps the registry Chat call with admission control,
+// request coalescing, and tracing.
 func (g *Gateway) chatWithTracing(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	ctx, span := telemetry.Tracer.Start(ctx, "provider.chat",
 		trace.WithAttributes(telemetry.AttrModel.String(req.Model)),
 	)
 	defer span.End()
 
-	resp, err := g.registry.Chat(ctx, req)
+	// Admission control: limit concurrent provider calls.
+	release, err := g.admission.Admit(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "admission rejected")
+		return nil, err
+	}
+	defer release()
+
+	// Request coalescing: dedup identical in-flight requests.
+	cacheKey := cache.Key(req.Model, req.Messages)
+	val, err, shared := g.coalescer.Do(cacheKey, func() (any, error) {
+		return g.registry.Chat(ctx, req)
+	})
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
+	resp := val.(*provider.ChatResponse)
 	span.SetAttributes(
 		telemetry.AttrProvider.String(resp.Provider),
 		telemetry.AttrModel.String(resp.Model),
+		attribute.Bool("coalesced", shared),
 	)
+
+	if shared {
+		slog.Debug("request coalesced", "model", req.Model)
+	}
+
 	return resp, nil
 }
 
