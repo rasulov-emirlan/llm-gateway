@@ -6,15 +6,20 @@
   "links": [],
   "panels": [
     {
-      "title": "Requests per Second",
+      "title": "Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Requests / sec",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
           "custom": {
-            "axisBorderShow": false,
             "drawStyle": "line",
             "fillOpacity": 20,
             "lineWidth": 2,
@@ -23,21 +28,20 @@
             "stacking": { "mode": "none" }
           },
           "unit": "reqps"
-        },
-        "overrides": []
+        }
       },
       "targets": [
         {
-          "expr": "rate(llm_gateway_requests_total[1m])",
+          "expr": "sum(rate(llm_gateway_requests_total[1m])) by (model)",
           "legendFormat": "{{model}}",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Request Duration (p50 / p95 / p99)",
+      "title": "Latency (p50 / p95 / p99)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -46,27 +50,24 @@
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 2,
-            "pointSize": 5,
-            "spanNulls": false,
-            "stacking": { "mode": "none" }
+            "spanNulls": false
           },
           "unit": "s"
-        },
-        "overrides": []
+        }
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(llm_gateway_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_gateway_request_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(llm_gateway_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, sum(rate(llm_gateway_request_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(llm_gateway_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, sum(rate(llm_gateway_request_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -75,7 +76,7 @@
     {
       "title": "Total Requests",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 0 },
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -87,8 +88,7 @@
               { "color": "red", "value": 10000 }
             ]
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
         "colorMode": "background",
@@ -106,15 +106,46 @@
       ]
     },
     {
-      "title": "Cache Hit Rate",
-      "type": "gauge",
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 4 },
+      "title": "Rate Limited",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
-          "max": 1,
-          "min": 0,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "expr": "sum(llm_gateway_rate_limited_total) or vector(0)",
+          "legendFormat": "429s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "max": 1, "min": 0,
           "unit": "percentunit",
           "thresholds": {
             "steps": [
@@ -123,8 +154,7 @@
               { "color": "green", "value": 0.6 }
             ]
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -140,9 +170,47 @@
       ]
     },
     {
-      "title": "Prompt Tokens per Minute",
+      "title": "Error Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "max": 1, "min": 0,
+          "unit": "percentunit",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_gateway_rate_limited_total[5m])) / (sum(rate(llm_gateway_requests_total[5m])) > 0) or vector(0)",
+          "legendFormat": "Error %",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Tokens",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "collapsed": false
+    },
+    {
+      "title": "Prompt Tokens / min by Model",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -154,21 +222,20 @@
             "stacking": { "mode": "normal" }
           },
           "unit": "short"
-        },
-        "overrides": []
+        }
       },
       "targets": [
         {
-          "expr": "rate(llm_gateway_prompt_tokens_total[1m]) * 60",
+          "expr": "sum(rate(llm_gateway_prompt_tokens_total[1m])) by (model) * 60",
           "legendFormat": "{{model}}",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Completion Tokens per Minute",
+      "title": "Completion Tokens / min by Model",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -180,21 +247,144 @@
             "stacking": { "mode": "normal" }
           },
           "unit": "short"
-        },
-        "overrides": []
+        }
       },
       "targets": [
         {
-          "expr": "rate(llm_gateway_completion_tokens_total[1m]) * 60",
+          "expr": "sum(rate(llm_gateway_completion_tokens_total[1m])) by (model) * 60",
           "legendFormat": "{{model}}",
           "refId": "A"
         }
       ]
+    },
+    {
+      "title": "Token Totals",
+      "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [{ "color": "blue", "value": null }]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "expr": "sum(llm_gateway_prompt_tokens_total)",
+          "legendFormat": "Prompt Tokens",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(llm_gateway_completion_tokens_total)",
+          "legendFormat": "Completion Tokens",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(llm_gateway_prompt_tokens_total) + sum(llm_gateway_completion_tokens_total)",
+          "legendFormat": "Total Tokens",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "title": "Providers",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "collapsed": false
+    },
+    {
+      "title": "Requests by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": { "mode": "normal" }
+          },
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_gateway_prompt_tokens_total[1m])) by (provider) * 60",
+          "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Tokens by Provider",
+      "type": "piechart",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "right" },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "expr": "sum(llm_gateway_prompt_tokens_total + llm_gateway_completion_tokens_total) by (provider)",
+          "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Latency by Model",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": false
+          },
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(llm_gateway_request_duration_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "{{model}} p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Rate Limiting & Cache",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "collapsed": false
     },
     {
       "title": "Cache Hits vs Misses",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 25 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -220,57 +410,21 @@
       },
       "targets": [
         {
-          "expr": "rate(llm_gateway_cache_hits_total[1m]) * 60",
+          "expr": "sum(rate(llm_gateway_cache_hits_total[1m])) * 60",
           "legendFormat": "Hits",
           "refId": "A"
         },
         {
-          "expr": "rate(llm_gateway_cache_misses_total[1m]) * 60",
+          "expr": "sum(rate(llm_gateway_cache_misses_total[1m])) * 60",
           "legendFormat": "Misses",
           "refId": "B"
         }
       ]
     },
     {
-      "title": "Total Tokens (Cumulative)",
-      "type": "stat",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "blue", "value": null }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
-      },
-      "targets": [
-        {
-          "expr": "sum(llm_gateway_prompt_tokens_total)",
-          "legendFormat": "Prompt Tokens",
-          "refId": "A"
-        },
-        {
-          "expr": "sum(llm_gateway_completion_tokens_total)",
-          "legendFormat": "Completion Tokens",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "title": "Rate Limited Requests",
+      "title": "Rate Limited Requests / min",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 25 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
         "defaults": {
@@ -278,52 +432,47 @@
           "custom": {
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 1,
-            "stacking": { "mode": "none" }
+            "lineWidth": 1
           },
           "unit": "short"
-        },
-        "overrides": []
+        }
       },
       "targets": [
         {
-          "expr": "rate(llm_gateway_rate_limited_total[1m]) * 60",
-          "legendFormat": "429s / min",
+          "expr": "sum(rate(llm_gateway_rate_limited_total[1m])) by (client_ip) * 60",
+          "legendFormat": "{{client_ip}}",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Rate Limited (Total)",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "title": "Rate Limited by Client",
+      "type": "table",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 25 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 100 }
-            ]
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "429 Count" }]
           }
-        },
-        "overrides": []
+        ]
       },
       "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "showHeader": true
       },
       "targets": [
         {
-          "expr": "sum(llm_gateway_rate_limited_total) or vector(0)",
-          "legendFormat": "429s",
-          "refId": "A"
+          "expr": "topk(10, sum(llm_gateway_rate_limited_total) by (client_ip))",
+          "legendFormat": "{{client_ip}}",
+          "refId": "A",
+          "format": "table",
+          "instant": true
         }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true } } }
       ]
     }
   ],
@@ -336,5 +485,5 @@
   "timezone": "browser",
   "title": "LLM Gateway",
   "uid": "llm-gateway",
-  "version": 2
+  "version": 3
 }
