@@ -7,7 +7,7 @@ import (
 )
 
 func TestTracker_RecordAndGetUsage(t *testing.T) {
-	tracker := NewTracker()
+	tracker := NewMemoryTracker()
 
 	tracker.RecordUsage(context.Background(), Record{
 		APIKeyID:         "key-1",
@@ -40,7 +40,7 @@ func TestTracker_RecordAndGetUsage(t *testing.T) {
 }
 
 func TestTracker_GetUsage_FiltersByKey(t *testing.T) {
-	tracker := NewTracker()
+	tracker := NewMemoryTracker()
 
 	tracker.RecordUsage(context.Background(), Record{
 		APIKeyID: "key-1", Model: "gpt-4o", TotalTokens: 100,
@@ -56,7 +56,7 @@ func TestTracker_GetUsage_FiltersByKey(t *testing.T) {
 }
 
 func TestTracker_DailyTokens(t *testing.T) {
-	tracker := NewTracker()
+	tracker := NewMemoryTracker()
 
 	tracker.RecordUsage(context.Background(), Record{
 		APIKeyID: "key-1", TotalTokens: 500,
@@ -72,7 +72,7 @@ func TestTracker_DailyTokens(t *testing.T) {
 }
 
 func TestTracker_CheckBudget(t *testing.T) {
-	tracker := NewTracker()
+	tracker := NewMemoryTracker()
 
 	tracker.RecordUsage(context.Background(), Record{
 		APIKeyID: "key-1", TotalTokens: 800,
@@ -95,7 +95,7 @@ func TestTracker_CheckBudget(t *testing.T) {
 }
 
 func TestTracker_CheckBudget_UnlimitedReturnsNegativeOne(t *testing.T) {
-	tracker := NewTracker()
+	tracker := NewMemoryTracker()
 	remaining := tracker.CheckBudget("key-1", 0)
 	if remaining != -1 {
 		t.Fatalf("expected -1 (unlimited), got %d", remaining)

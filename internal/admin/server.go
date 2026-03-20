@@ -18,12 +18,12 @@ import (
 type Server struct {
 	registry  *provider.Registry
 	keyStore  *apikey.Store
-	tracker   *usage.Tracker
+	tracker   usage.Tracker
 	admission *queue.AdmissionController
 }
 
 // NewServer creates an admin API server.
-func NewServer(registry *provider.Registry, keyStore *apikey.Store, tracker *usage.Tracker, admission *queue.AdmissionController) *Server {
+func NewServer(registry *provider.Registry, keyStore *apikey.Store, tracker usage.Tracker, admission *queue.AdmissionController) *Server {
 	return &Server{
 		registry:  registry,
 		keyStore:  keyStore,

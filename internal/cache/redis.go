@@ -17,29 +17,15 @@ type Cache struct {
 	ttl    time.Duration
 }
 
-// New creates a Redis-backed cache. If redisURL is empty, returns nil (disabled).
-func New(redisURL string, ttl time.Duration) (*Cache, error) {
-	if redisURL == "" {
-		slog.Info("cache disabled (no redis url configured)")
-		return nil, nil
+// New creates a Redis-backed cache. If client is nil, returns nil (disabled).
+func New(client *redis.Client, ttl time.Duration) *Cache {
+	if client == nil {
+		slog.Info("cache disabled (no redis client)")
+		return nil
 	}
 
-	opts, err := redis.ParseURL(redisURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse redis url: %w", err)
-	}
-
-	client := redis.NewClient(opts)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("redis ping: %w", err)
-	}
-
-	slog.Info("cache enabled", "redis_url", redisURL, "ttl", ttl)
-	return &Cache{client: client, ttl: ttl}, nil
+	slog.Info("cache enabled", "ttl", ttl)
+	return &Cache{client: client, ttl: ttl}
 }
 
 // Get retrieves a cached response. Returns nil, false if cache is disabled or key not found.
@@ -93,10 +79,8 @@ func Key(model string, messages []provider.Message) string {
 	return fmt.Sprintf("llmcache:%x", hash)
 }
 
-// Close shuts down the Redis client. No-op if cache is disabled.
-func (c *Cache) Close() error {
-	if c == nil {
-		return nil
-	}
-	return c.client.Close()
+// Close shuts down the cache. No-op if cache is disabled.
+// Note: does NOT close the shared Redis client — that's the caller's responsibility.
+func (c *Cache) Close() {
+	// No-op. The shared Redis client is closed by main().
 }

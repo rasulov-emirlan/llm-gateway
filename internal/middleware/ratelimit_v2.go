@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
+	"github.com/redis/go-redis/v9"
 )
 
 // slidingWindow tracks request timestamps within a rolling window.
@@ -47,29 +49,49 @@ type rateLimiterV2 struct {
 	mu      sync.Mutex
 	windows map[string]*slidingWindow // key → sliding window
 	metrics *telemetry.Metrics
+
+	// Redis-backed distributed rate limiting (nil = in-memory fallback).
+	redis *redisSlidingWindow
 }
 
 // RateLimitV2 returns middleware that enforces per-API-key sliding window
 // rate limiting. It reads the API key from context (set by Auth middleware)
 // and enforces RPM limits. If no API key is present, it falls back to
 // per-IP rate limiting with the provided default RPM.
-func RateLimitV2(defaultRPM int, metrics *telemetry.Metrics) func(http.Handler) http.Handler {
+//
+// If redisClient is non-nil, rate limits are enforced via Redis (distributed).
+// Otherwise, falls back to in-memory enforcement (single-instance only).
+func RateLimitV2(defaultRPM int, metrics *telemetry.Metrics, redisClient *redis.Client) func(http.Handler) http.Handler {
 	rl := &rateLimiterV2{
 		windows: make(map[string]*slidingWindow),
 		metrics: metrics,
 	}
 
-	// Background cleanup of stale windows.
-	go rl.cleanup(5 * time.Minute)
+	if redisClient != nil {
+		rl.redis = &redisSlidingWindow{client: redisClient}
+		slog.Info("rate limiter using redis (distributed mode)")
+	} else {
+		slog.Info("rate limiter using in-memory (single-instance mode)")
+	}
+
+	// Background cleanup of stale in-memory windows.
+	if redisClient == nil {
+		go rl.cleanup(5 * time.Minute)
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key, rpm := rl.resolveKeyAndLimit(r, defaultRPM)
 
-			window := rl.getWindow(key)
-			count := window.count(time.Minute)
+			count, allowed, err := rl.checkLimit(r.Context(), key, rpm)
+			if err != nil {
+				// Redis error: log and allow (fail-open).
+				slog.Error("rate limit check failed, allowing request", "error", err, "key", key)
+				next.ServeHTTP(w, r)
+				return
+			}
 
-			if count >= rpm {
+			if !allowed {
 				rl.metrics.RateLimited.Add(r.Context(), 1,
 					telemetry.WithAttr(telemetry.ClientAttr(key)))
 
@@ -86,15 +108,37 @@ func RateLimitV2(defaultRPM int, metrics *telemetry.Metrics) func(http.Handler) 
 				return
 			}
 
-			window.add()
-
 			// Set rate limit headers (like OpenAI does).
 			w.Header().Set("X-RateLimit-Limit", formatInt(rpm))
-			w.Header().Set("X-RateLimit-Remaining", formatInt(rpm-count-1))
+			w.Header().Set("X-RateLimit-Remaining", formatInt(rpm-count))
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// checkLimit checks the rate limit using Redis or in-memory fallback.
+// Returns (current count after this request, allowed, error).
+func (rl *rateLimiterV2) checkLimit(ctx context.Context, key string, rpm int) (int, bool, error) {
+	if rl.redis != nil {
+		redisKey := "ratelimit:" + key
+		res, err := rl.redis.check(ctx, redisKey, rpm, time.Minute)
+		if err != nil {
+			return 0, false, err
+		}
+		return res.count, res.allowed, nil
+	}
+
+	// In-memory fallback.
+	window := rl.getWindow(key)
+	count := window.count(time.Minute)
+
+	if count >= rpm {
+		return count, false, nil
+	}
+
+	window.add()
+	return count + 1, true, nil
 }
 
 // resolveKeyAndLimit determines the rate limit key and RPM for the request.

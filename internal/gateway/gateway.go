@@ -11,6 +11,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/erasulov/llm-gateway/internal/apikey"
 	"github.com/erasulov/llm-gateway/internal/cache"
 	"github.com/erasulov/llm-gateway/internal/config"
@@ -28,13 +30,14 @@ type Gateway struct {
 	metrics   *telemetry.Metrics
 	cache     *cache.Cache
 	keyStore  *apikey.Store
-	tracker   *usage.Tracker
+	tracker   usage.Tracker
+	rdb       *redis.Client
 	admission *queue.AdmissionController
 	coalescer *queue.Coalescer
 	pipeline  *pipelinepkg.Pipeline
 }
 
-func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker *usage.Tracker, pipeline *pipelinepkg.Pipeline) *Gateway {
+func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Metrics, c *cache.Cache, keyStore *apikey.Store, tracker usage.Tracker, rdb *redis.Client, pipeline *pipelinepkg.Pipeline) *Gateway {
 	return &Gateway{
 		registry:  registry,
 		cfg:       cfg,
@@ -42,6 +45,7 @@ func New(registry *provider.Registry, cfg *config.Config, metrics *telemetry.Met
 		cache:     c,
 		keyStore:  keyStore,
 		tracker:   tracker,
+		rdb:       rdb,
 		admission: queue.NewAdmissionController(cfg.MaxConcurrent, cfg.MaxQueueDepth),
 		coalescer: queue.NewCoalescer(),
 		pipeline:  pipeline,
@@ -62,7 +66,7 @@ func (g *Gateway) Router() http.Handler {
 
 	// Auth injects API key into context; RateLimitV2 reads it for per-key limits.
 	protected := middleware.Auth(g.keyStore)(api)
-	protected = middleware.RateLimitV2(g.cfg.RateBurst, g.metrics)(protected)
+	protected = middleware.RateLimitV2(g.cfg.RateBurst, g.metrics, g.rdb)(protected)
 
 	// Top-level mux: health is public, everything else is protected.
 	mux := http.NewServeMux()

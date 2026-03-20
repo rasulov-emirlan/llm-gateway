@@ -19,6 +19,7 @@ import (
 	anthropicProvider "github.com/erasulov/llm-gateway/internal/provider/anthropic"
 	ollamaProvider "github.com/erasulov/llm-gateway/internal/provider/ollama"
 	openaiProvider "github.com/erasulov/llm-gateway/internal/provider/openai"
+	"github.com/erasulov/llm-gateway/internal/redisclient"
 	"github.com/erasulov/llm-gateway/internal/telemetry"
 	"github.com/erasulov/llm-gateway/internal/usage"
 )
@@ -48,13 +49,18 @@ func main() {
 	}
 	defer shutdownTracing()
 
-	// Initialize cache.
-	c, err := cache.New(cfg.RedisURL, cfg.CacheTTL)
+	// Initialize shared Redis client (nil if REDIS_URL is empty).
+	rdb, err := redisclient.New(cfg.RedisURL)
 	if err != nil {
-		slog.Error("failed to initialize cache", "error", err)
+		slog.Error("failed to connect to redis", "error", err)
 		os.Exit(1)
 	}
-	defer c.Close()
+	if rdb != nil {
+		defer rdb.Close()
+	}
+
+	// Initialize cache.
+	c := cache.New(rdb, cfg.CacheTTL)
 
 	// Build provider registry.
 	registry := buildRegistry(cfg)
@@ -62,13 +68,20 @@ func main() {
 	// Build API key store.
 	keyStore := buildKeyStore(cfg)
 
-	// Initialize usage tracker.
-	tracker := usage.NewTracker()
+	// Initialize usage tracker — Redis-backed if available, in-memory otherwise.
+	var tracker usage.Tracker
+	if rdb != nil {
+		tracker = usage.NewRedisTracker(rdb)
+		slog.Info("usage tracker using redis (distributed mode)")
+	} else {
+		tracker = usage.NewMemoryTracker()
+		slog.Info("usage tracker using in-memory (single-instance mode)")
+	}
 
 	// Build content processing pipeline.
 	pipe := buildPipeline()
 
-	gw := gateway.New(registry, cfg, metrics, c, keyStore, tracker, pipe)
+	gw := gateway.New(registry, cfg, metrics, c, keyStore, tracker, rdb, pipe)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

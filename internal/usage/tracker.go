@@ -38,10 +38,18 @@ type ModelUsage struct {
 	CostUSD          float64 `json:"cost_usd"`
 }
 
-// Tracker records and queries usage data. In-memory implementation
-// suitable for single-instance deployments; can be extended with
-// Redis or Postgres backing for production.
-type Tracker struct {
+// Tracker defines the interface for usage tracking.
+// Implementations must be safe for concurrent use.
+type Tracker interface {
+	RecordUsage(ctx context.Context, rec Record)
+	DailyTokens(keyID string) int64
+	CheckBudget(keyID string, dailyCap int64) int64
+	GetUsage(keyID string, since time.Time) *Summary
+}
+
+// MemoryTracker is an in-memory usage tracker suitable for single-instance
+// deployments. For multi-instance deployments, use RedisTracker.
+type MemoryTracker struct {
 	mu      sync.RWMutex
 	records []Record
 
@@ -54,16 +62,16 @@ type dailyCounter struct {
 	tokens int64
 }
 
-// NewTracker creates a new in-memory usage tracker.
-func NewTracker() *Tracker {
-	return &Tracker{
+// NewMemoryTracker creates a new in-memory usage tracker.
+func NewMemoryTracker() *MemoryTracker {
+	return &MemoryTracker{
 		records:     make([]Record, 0, 1024),
 		dailyTokens: make(map[string]*dailyCounter),
 	}
 }
 
 // RecordUsage records a usage event and updates daily counters.
-func (t *Tracker) RecordUsage(_ context.Context, rec Record) {
+func (t *MemoryTracker) RecordUsage(_ context.Context, rec Record) {
 	rec.Timestamp = time.Now()
 	rec.CostUSD = CalculateCost(rec.Model, rec.PromptTokens, rec.CompletionTokens)
 
@@ -92,7 +100,7 @@ func (t *Tracker) RecordUsage(_ context.Context, rec Record) {
 }
 
 // DailyTokens returns the total tokens consumed by a key today.
-func (t *Tracker) DailyTokens(keyID string) int64 {
+func (t *MemoryTracker) DailyTokens(keyID string) int64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -106,7 +114,7 @@ func (t *Tracker) DailyTokens(keyID string) int64 {
 
 // CheckBudget returns the remaining daily tokens for a key.
 // Returns -1 if unlimited (cap == 0).
-func (t *Tracker) CheckBudget(keyID string, dailyCap int64) int64 {
+func (t *MemoryTracker) CheckBudget(keyID string, dailyCap int64) int64 {
 	if dailyCap == 0 {
 		return -1 // unlimited
 	}
@@ -119,7 +127,7 @@ func (t *Tracker) CheckBudget(keyID string, dailyCap int64) int64 {
 }
 
 // GetUsage returns a usage summary for a key within the given time window.
-func (t *Tracker) GetUsage(keyID string, since time.Time) *Summary {
+func (t *MemoryTracker) GetUsage(keyID string, since time.Time) *Summary {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
